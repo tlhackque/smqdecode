@@ -1,0 +1,17 @@
+*~
+*#
+*.swp
+*.tmp
+*.bak
+*.tdy
+*.tar.gz
+*.orig
+df*
+qf*
+xf*
+df/*
+qf/*
+xf/*
+smqdecode-*
+Commitlog
+

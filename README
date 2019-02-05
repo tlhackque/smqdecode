@@ -1,0 +1,48 @@
+smqdecode - sendmail queue decoder
+
+
+smqdecode allows you to inspect the contents of a sendmail
+message queue.  It enables you to:
+
+o decode the metadata of any entry in the queue
+
+o extract the message headers of any entry in the queue
+
+o extract the message body of any entry in the queue - with
+  or without headers.
+
+o extract the message transcript, if any, containing errors
+  that sendmail has encountered during processing.
+
+These features allow you to extract a message from the queue
+for analysis without delivering it.  This is particularly useful
+for quarantined messages.
+
+It can be a companion to the sendmail distribution's 'qtool', which
+allows you to move/remove messages in a queue, but does not facilitate
+analyzing them.
+
+Usage:
+     smqdecode --body     --config   --flags   --headers
+               --limit-body=[N,none] --message --metadata --skip-busy
+               --queue   --warnings  --type=[all,pended,quarantined,temporary]
+               --help    --man       --version
+
+     smqdecode --meta x0VKKEWx032646 qfx0VKKEWx032647 /foo/hfx0VKKEWx032649
+
+     smqdecode --headers --body  x0VKKEWx032646
+
+Note that if no message is specified, all messages in the queue
+are processed.
+
+smqdecode can also be used as a Perl module which provides an API
+for examining messages in a queue.  This is an experimental feature.
+Use --man for documentation.
+
+See the LICENSE file for the license associated with all files in
+this distribution.
+
+Report any bugs, feature requests and/or patches on the issue tracker,
+located at https://github.com/tlhackque/smqdecode/issues.  In the
+event that the project moves, contact the author directly.
+

@@ -1,0 +1,1463 @@
+#!/usr/bin/perl
+
+# Sendmail Queue decoder
+
+package TL::SmqDecode;
+
+use warnings;
+use strict;
+
+my $copyright = << 'COPYRIGHT';
+Copyright (C) 2019 Timothe Litt <litt at acm.org>
+Use --man for license information.
+COPYRIGHT
+
+our $VERSION = 'V1.001';
+
+# License is in the POD at the end of this file.
+
+# Loose ends:
+#  Unvalidated record types: Y, A
+
+# Defaults
+
+my $ddir = '/var/spool/mqueue';
+my $dcfg = '/etc/mail/sendmail.cf';
+
+package TL::SmqDecode::Qf;
+
+# Decoded Queue entry control file
+#
+# Knows how to dump each section.
+# May grow some accessors.
+
+use warnings;
+use strict;
+
+use Carp;
+use Fcntl( qw/:flock :seek/ );
+use POSIX( qw/strftime/ );
+
+# Forward references
+
+sub new;
+sub dumpmeta;
+sub dumpbody;
+sub dumptranscript;
+
+sub _pflags;
+sub _pdate;
+sub _pdelta;
+sub _pperms;
+
+# Flag names for F records
+
+my %Fflags = ( 8 => 'Has 8-bit',
+               b => 'Delete empty Bcc',
+               d => 'DSN RET',
+               n => 'Don\'t return body',
+               r => 'Response',
+               s => 'Split recipients',
+               w => 'Warning sent', );
+
+# Flag names for H records
+#
+# Not all apply to headers; these are delivery agent flags
+# In some cases, a delivery agent rule calls for headers
+# matching a flag.  In others, the flag indicates that the
+# header was added due to a condition (usually insufficiency)
+# in the message as received. (e.g. add missing date, Message-ID..)
+
+my %hdrFlags = (  #<<<
+        '%' => 'Hold for ETRN',                 '0' => 'No MX lookups',
+        '1' => 'No null bytes',                 '2' => 'No ESMTP',
+        '3' => 'EBCDIC quoted-printable',       '5' => 'Use localaddr ruleset 5',
+        '6' => 'Strip headers to 7 bits',       '7' => 'Strip high bit when delivering',
+        '8' => 'Forced EightBitMode=p MIME',    '9' => 'Convert 7 to 8-bit conditionally',
+        ':' => 'Check for :include files',      '|' => 'Check for |program addresses',
+        '/' => 'Check for /file addresses',     '@' => 'User can be database key',
+        'a' => 'Use ESMTP',                     'A' => 'User can be LHS of alias',
+        'b' => 'Add blank line to message',     'B' => 'Strip one leading backslash',
+        'c' => 'Exclude comment from $g',       'C' => 'Add @domain to recipient',
+        'd' => 'Never use <> in route addrs',   'D' => 'Need Date: in header',
+        'e' => 'Expensive delivery agent',      'E' => 'Change exta From into >From',
+        'f' => 'Agend adds -f to argv',         'F' => 'Need From: in header',
+        'g' => 'Suppress From:<>',              'h' => 'Keep uppercase in hostname',
+        'H' => 'Mail11 v3 preview headers',     'i' => 'UserDB sender envelope rewrite',
+        'I' => 'Send SMTP VERB',                'j' => 'UserDB rewrite header rcpts',
+        'k' => 'Don\'t check for EHLO loops',   'l' => 'Local delivery agent',
+        'L' => 'Specify SMTP line limits',      'm' => 'Multiple recipients possible',
+        'M' => 'Need Message-ID: in header',    'n' => 'No Unix-style From in header',
+        'N' => 'Mail11 v3 multistatus',         'o' => 'Run delivery agent as recipient',
+        'p' => 'RFC821 return path process',    'P' => 'Need Return-Path: in header',
+        'q' => 'SMTP VRFY 250 vs 252 return',   'r' => 'Delivery agent add -r to argv',
+        'R' => 'Use reserved TCP port',         's' => 'Strip quotation marks',
+        'S' => 'Assume specified user&group',   'u' => 'Preserve username uppercase',
+        'U' => 'Use UUCP-style From',           'v' => 'SysVR4',
+        'V' => 'UIUC',                          'w' => 'Check passwd for valid user id',
+        'W' => 'Ignore host status for agent',  'x' => 'Need Full-Name: in header',
+        'X' => 'Agent uses RFC2821 hidden dot', 'z' => 'Deliver with LMTP',
+        'Z' => 'Use DialDelay\'s sleep',        '~' => 'SGI valid home directory check',
+               );
+
+#>>>
+
+# Flag names for R records
+
+my %Rflags = ( P => 'Primary',
+               A => 'Alias expansion',
+               S => 'DSN Success',
+               F => 'DSN Failure',
+               B => 'DSN Return body',
+               D => 'DSN Delay',
+               N => 'DSN Extension present', );
+
+# DeliverBy return flags
+
+my %rtnFlags = ( R => 'Return',
+                 N => 'Notify',
+                 T => 'Trace', );
+
+# Metatdata decoder
+#
+# Record type => 'label' (for strings)
+# Record type => [ 'label', 'format' ] (sprintf $format $value)
+# Record type => [ 'label'; sub { $qe,$key, $value } ]
+#                  sub returns string or undef
+# Presentation order
+
+my @meta = (
+    _qsize => [
+        "Queue File",
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            return
+                sprintf( "%s Size: %u, Permissions: %s",
+                         $qe->{_fname}, $v,
+                         _pperms( $qe->{_qperm} ) );
+            }
+    ],
+    _type => [
+        Type => sub {
+            return { 'q' => 'Queued mail',
+                     'h' => 'Quarantined mail',
+                     't' => 'Temporary queue entry', }->{ $_[2] };
+            }
+    ],
+    V => [
+        'Version',
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            my $txt = { 1 => '1 - sendmail 8.7.5 and earlier',
+                        2 => '2 - sendmail 8.7.6 through 8.9.3',
+                        4 => '4 - sendmail 8.10 through 8.11',
+                        5 => '5 - sendmail 8.10 through 8.11 with FFR_QUEUEDELAY',
+                        6 => '6 - sendmail 8.12',
+                        7 => '7 - sendmail 8.12 with FFR_QUEUEDELAY',
+                        8 => '8 - sendmail 8.13+, with quarantine', }->{$v};
+            $txt = "$v - unknown version" unless( defined $txt );
+            return $txt;
+        }, ],
+    T    => [ 'Arrival Date' => \&_pdate ],
+    _age => [ 'Age'          => \&_pdelta ],
+    N    => 'Attempts',
+    K    => [
+        'Last Attempt' => sub {
+            return 'none' if( $_[2] == 0 );
+            return _pdate( @_ );
+            }
+         ],
+    _elapsed => [ 'Elapsed' => \&_pdelta ],
+    Y        => 'Current delay',
+    '!'      => [
+        'Deliver by',
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            return
+                sprintf( '%s delta: %s mode: %s',
+                         _pdate( $qe, $k, $v->{due} ),
+                         _pdelta( $qe, $k, $v->{delta}, 1, '+' ),
+                         _pflags( \%rtnFlags, $v->{mode}, 1 ) );
+            }
+           ],
+
+    P      => [ 'Priority', '%d.' ],
+    M      => 'Reason',
+    'q'    => 'Quarantine',
+    D      => 'Data filename',
+    _dname => [
+        'Data file',
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            my $txt = '';
+            $txt = "$qe=>{d}/" if( defined $qe->{d} );
+            return $txt
+                .
+                sprintf( "%s Size: %u, Permissions: %s",
+                         $v, $qe->{_dsize},
+                         _pperms( $qe->{_dperm} ) );
+            }
+    ],
+    I => [
+        'Data inode',
+        sub {
+            my( $v ) = $_[2];
+
+            return
+                sprintf( 'Major: %u, Minor: %u, Inode: %u',
+                         @{$v}{qw/major minor inode/} );
+            }
+         ],
+    B => 'Body type',
+    L => 'Content length',
+    C => 'Owner',
+    F => [ 'Flags' => sub { return _pflags( \%Fflags, $_[2] ) } ],
+    Z => 'Envelope ID',
+    S => 'Sender',
+    A => 'Sender Auth',
+    E => 'Errors to',
+    Q => [
+        'Orphan ORCPT' => sub {
+            my $v = $_[2];
+
+            return
+                sprintf( 'Type: %s Addr: %s',
+                         defined $v->[0] ? $v->[0] : 'unspecified',
+                         $v->[1] );
+            }
+         ],
+    R => [
+        'Recipients',
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            my $txt = '';
+            foreach my $r ( @$v ) {
+                my $rt = '';
+                if( keys %{ $r->{flags} } ) {
+                    $rt .= _pflags( \%Rflags, $r->{flags} );
+                }
+                if( $r->{or} ) {
+                    $rt .= sprintf( "ORCPT type: %s Addr: %s\n",
+                                    defined $r->{or}[0]
+                                    ? $r->{or}[0]
+                                    : 'unspecified',
+                                    $r->{or}[1] );
+                }
+                if( length $rt ) {
+                    $rt =~ s/^/  /gm;
+                }
+                $txt .= "$r->{addr}\n$rt";
+            }
+            return $txt;
+            }
+         ],
+    r => [
+        'Final recipient',
+        sub {
+            my $v = $_[2];
+
+            return
+                sprintf( 'Type: %s, Addr: %s',
+                         @{$v}{qw/type addr/} );
+            }
+         ],
+    '$' => [
+        'Macros',
+        sub {
+            my( $m ) = ( $_[2] );
+
+            my $nw = 0;
+            foreach ( keys %$m ) {
+                $nw = length if( length > $nw );
+            }
+
+            my $txt = '';
+            foreach my $k ( sort keys %$m ) {
+                $txt .= sprintf( "%-*s: \"%s\"\n", $nw, $k,
+                                 $m->{$k} );
+            }
+            return $txt;
+            }
+           ],
+    '_xf' => [
+        'Transcript',
+        sub {
+            my( $qe, $k, $v ) = @_;
+
+            return
+                sprintf( "%s Size: %u, Permissions: %s",
+                         $v, $qe->{_xsize},
+                         _pperms( $qe->{_xperm} ) );
+            }
+    ], );
+
+# Constructor for Qf
+
+sub new {
+    my $class = shift;
+    my( $entry, $opts ) = @_;
+
+    my( $fn, $dfd, $qfd, $xfd ) = ( $entry->fn, $entry->dfd, $entry->qfd, $entry->xfd );
+
+    my $type = substr( $fn, 0, 1 );
+    my $qe = { B      => '7BIT',
+               _dname => 'd' . substr( $fn, 1 ),
+               _fname => $fn,
+               _type  => $type, };
+    unless( $type =~ /^[qht]$/ ) {  # queue and quarantine, temp rewrite
+        die( "$fn: Not a sendmail queue file name\n" );
+    }
+
+    # Queue control file
+
+    CORE::open( my $fh, '<', File::Spec->catfile( $qfd, $fn ) ) or do {
+        return if( $opts->{skip} );
+        die( "$fn: open - $!\n" );
+    };
+    flock( $fh, LOCK_SH | LOCK_NB ) or do {
+        return if( $opts->{skip} );
+        die( "$fn: lock - $!\n" );
+    };
+    @{$qe}{qw/_qperm _qsize/} = ( stat $fh )[ 2, 7 ];
+
+    # Parse control file
+
+    my $dot;
+QF:
+    while( <$fh> ) {
+        next if( /^$/ );
+        if( $dot ) {
+            s/(%|[^[:graph:]\s])/sprintf( '%%%02x', ord $1 )/ge;
+            warn( "Line $.: Data after end marker ignored\n", $_ ) if( $opts->{warn} );
+            last;
+        }
+        if( /^A(.+)$/ ) {  # Authenticated envelope sender
+            $qe->{A} = $1;
+            next;
+        }
+        if( /^B(.+)$/ ) {  # Body type
+            $qe->{B} = $1;
+            next;
+        }
+        if( /^C([^:]*):(\d+):(\d+)(?::(.+))?$/ ) {  # Owner
+            my( $user, $uid, $gid, $eaddr ) = ( $1, $2, $3, $4 );
+
+            my $unm = getpwuid( $uid );
+            my $gnm = getgrgid( $gid );
+            $qe->{C} = sprintf( "%s:%s.%s%s",
+                                $user,
+                                defined $unm   ? $unm      : $uid,
+                                defined $gnm   ? $gnm      : $gid,
+                                defined $eaddr ? ":$eaddr" : '' );
+            next;
+        }
+        if( m,^([Dd])(.+)$, ) {                     # data file name, path
+            $qe->{$1} = $2;
+            next;
+        }
+        if( /^F(.*)$/ ) {                           # Flags
+            $qe->{F} = { map { $_ => 1 } split( //, $1 ) };
+            next;
+        }
+        if( /^H(?:\?([^?]*)\?)?(.+)$/ ) {           # Header (optional delivery flags)
+            push @{ $qe->{H} }, {
+                  F => { map { $_ => 1 } split( //, defined $1 ? $1 : '' ) },
+                  H => $2 };
+            while( <$fh> ) {
+                redo QF unless( /^(\s+.*)$/ );
+                $qe->{H}->[-1]{H} .= "\n$1";
+            }
+            last QF;
+        }
+        if( m,^I(\d+)/(\d+)/(\d+)$, ) {             # Data file recovery
+            $qe->{I} = { major => $1, minor => $2, inode => $3 };
+            next;
+        }
+
+        # K - Last processed time, T First enqueued time
+        if( /^([KT])([+-])?(0x[[:xdigit:]]+|0[0-7]+|[1-9]\d*)$/ ) {
+            my $k    = $1;
+            my $sign = 1;
+            $sign = -1 if( defined $2 && $2 eq '-' );
+            my $time = $3;
+            $time = oct( $time ) if( $time =~ /^0/ );
+            $qe->{$k} = $time * $sign;
+            next;
+        }
+        if( /^!(.) ([+-])?(\d{1,9})$/ ) {  # Deliverby RFC 2852
+            my $flags = ord $1;
+            my $mode  = $flags & 0x0f;
+            $mode = ( $mode == 1 ) ? 'N' : ( $mode == 2 ) ? 'R' : $mode;
+            my $trace = ( $flags & 0xf0 ) >> 4;
+            $trace = ( $trace == 1 ) ? 'T' : $trace;
+            my $sign = 1;
+            $sign = 1 if( defined $2 && $2 eq '-' );
+            my $dt = $3 * $sign;
+            my $v = { delta => $dt,
+                      mode  => { $mode => 1, ( $trace ? ( $trace => 1 ) : () ) }, };
+            $qe->{'!'} = $v;
+            next;
+        }
+        if( /^L(.+)$/ ) {  # Content length
+            $qe->{L} = $1;
+            next;
+        }
+        if( /^([MqE])(.*)$/ ) {  # M Deferral message, q quarantine reason, E OBS
+            my $mt = $1;
+            $qe->{$mt} = $2;
+            while( <$fh> ) {
+                redo QF unless( /^(\s+.*)$/ );
+                $qe->{$mt} .= "\n$1";
+            }
+            last QF;
+        }
+        if( /^N(\d+)$/ ) {       # Number of attempts
+            $qe->{N} = $1;
+            next;
+        }
+        if( /^P([+-])?(0x[[:xdigit:]]+|0[0-7]+|[1-9]\d*)$/ ) {  # priority (cost)
+            my $sign = 1;
+            $sign = -1 if( defined $1 && $1 eq '-' );
+            my $pri = $2;
+            $pri = oct( $pri ) if( $pri =~ /^0/ );
+            $qe->{P} = $pri * $sign;
+            next;
+        }
+        if( /^Q(?:([^;]+);)?(.+)$/ ) {                          # ORCPT for next R
+            $qe->{Q} = [ $1, $2 ];
+            next;
+        }
+        if( /^R(?:([^:]+):)?(.+)$/ ) {                          # Recipient
+            my $or = delete $qe->{Q};
+            push @{ $qe->{R} }, {
+                ( $or ? ( or => $or ) : () ),
+                flags => {
+                    map { $_ => 1 }
+                        split( //, defined $1 ? $1 : "" ),
+
+                    # P Primary, SFD - DSN success,notify, delay
+                    # N DSN Enabled A expanded alias
+                         },
+                addr => $2, };
+            next;
+        }
+        if( /^r([^;]+);\s*(.*)$/ ) {  # Final recipient
+            $qe->{r} = { type => $1, addr => $2 };
+            next;
+        }
+        if( /^S\s*(.+?)\s*$/ ) {      # Sender
+            $qe->{S} = $1;
+            next;
+        }
+        if( /^V(\d+)$/ ) {            # File version
+            $qe->{V} = $1;
+            next;
+        }
+        if( /^Y(.+)$/ ) {             # Current delay
+            $qe->{Y} = $1;
+            next;
+        }
+        if( /^Z(.+)$/ ) {             # Envelope ID
+            $qe->{Z} = $1;
+            next;
+        }
+        if( /^\$(?:\{([^\{]+)\}|(.))(.*)$/ ) {  # Macro defn
+            $qe->{'$'}{ defined $1 ? $1 : $2 } = $3;
+            next;
+        }
+        if( /^\.$/ ) {
+            $dot = 1;
+            next;
+        }
+        if( $opts->{warn} ) {
+            s/(%|[^[:graph:]\s])/sprintf( '%%%02x', ord $1 )/ge;
+            warn( "Line $.: Unexpected format, ignored\n$_\n" );
+        }
+    }  # Each QF line
+
+    # Derived fields
+
+    my $now = time;
+    if( $qe->{K} ) {
+        $qe->{_elapsed} = $now - $qe->{K};
+    }
+    if( defined $qe->{T} ) {
+        $qe->{_age} = $now - $qe->{T};
+        if( defined $qe->{'!'} ) {
+            $qe->{'!'}{due} = $qe->{T} + $qe->{'!'}{delta};
+        }
+    }
+
+    # Return object
+
+    my $r = { qe  => $qe,
+              qfh => $fh, };
+
+    # Message body file
+
+    my $dfn = File::Spec->catfile( ( $qe->{d} || $dfd ), $qe->{_dname} );
+    if( CORE::open( my $df, '<', $dfn ) ) {
+        $r->{dfh} = $df;
+        @{$qe}{qw/_dperm _dsize/} = ( stat $df )[ 2, 7 ];
+    } else {
+        warn( "$dfn: $!\n" );
+    }
+
+    # Transcript file
+
+    my $xfn = $fn;
+    substr( $xfn, 0, 1, 'x' );
+    if( CORE::open( my $xf, '<', File::Spec->catfile( $xfd, $xfn ) ) ) {
+        $r->{xfh} = $xf;
+        @{$qe}{qw/_xf _xperm _xsize/} = ( $xfn, ( stat $xf )[ 2, 7 ] );
+    }
+
+    # Return holding lock and file handles
+
+    return bless $r, $class;
+}  # new Qf
+
+# Destructor
+
+sub DESTROY {
+    my $qf = shift;
+
+    close( $qf->{dfh} ) if( $qf->{dfh} );
+    close( $qf->{xfh} ) if( $qf->{xfh} );
+    close( $qf->{qfh} );
+
+    return;
+}
+
+# Accessors
+
+sub AUTOLOAD {
+    my $qf = $_[0];
+    croak( "$qf is not an object\n" ) unless( ref $qf );
+    my $name = our $AUTOLOAD;
+
+    return if( $name =~ /::DESTROY$/ );
+
+    #          accessor name  hash key
+    $name =~ s/^.*:://;
+    my $k = { auth         => 'A',      btype          => 'B',
+              owner        => 'C',      dataname       => 'D',
+              errorsto     => 'E',      bname          => '_dname',
+              bpath        => 'd',      bperm          => '_bperm',
+              bsize        => '_bsize', flags          => 'F',
+              headers      => 'H',      binode         => 'I',
+              attempted    => 'K',      received       => 'T',
+              deliverby    => '!',      length         => 'L',
+              reason       => 'M',      qreason        => 'q',
+              attempts     => 'N',      priority       => 'P',
+              recipients   => 'R',      finalrecipient => 'r',
+              sender       => 'S',      version        => 'V',
+              currentdelay => 'Y',      envelopeid     => 'Z',
+              macros       => '$',      type           => '_type',
+              qname        => '_fname', qperm          => '_qperm',
+              qsize        => '_qsize', xname          => '_xf',
+              xperm        => '_xperm', xsize          => '_xsize',
+              age          => '_age',   elapsed        => '_elapsed', }->{$name};
+    croak( qq(Unknown access method "$name" called\n) ) unless( defined $k );
+    no strict 'refs';  ## no critic ProhibitNoStrict
+    *$AUTOLOAD = sub { my $qf = shift; return $qf->{qe}{$k}; };
+    goto &$AUTOLOAD;
+}
+
+# Dump metadata
+#
+# $qf->dumpmeta( [$ofh] )
+
+sub dumpmeta {
+    my $qf = shift;
+    my( $ofh ) = @_;
+
+    $ofh ||= \*STDOUT;
+
+    my $qe = $qf->{qe};
+
+    my $lwid = 0;
+    for( my $i = 0; $i < @meta; $i += 2 ) {
+        my( $k, $r ) = @meta[ $i .. $i + 1 ];
+        $r = $meta[ $i + 1 ] = [ $meta[ $i + 1 ], '%s' ] unless( ref $r );
+        $r->[1] = '%s' if( @$r <= 1 );
+        $lwid = length( $r->[0] ) if( exists $qe->{$k}
+                                      && length( $r->[0] ) > $lwid );
+    }
+
+    for( my $i = 0; $i < @meta; $i += 2 ) {
+        my( $k, $r ) = @meta[ $i .. $i + 1 ];
+
+        next unless( exists $qe->{$k} );
+        my $fmt = $r->[1];
+
+        my $v = $qe->{$k};
+        if( ref $fmt ) {
+            $v = $fmt->( $qe, $k, $v );
+            next unless( defined $v );
+            $fmt = '%s';
+        }
+        printf $ofh ( '%-*s: ', $lwid, $r->[0] );
+        chomp $v;
+        $v =~ s/\n/"\n" . ' ' x ( $lwid +2)/ge;
+        printf $ofh ( "$fmt\n", $v );
+    }
+    return 1;
+}  # dumpmeta
+
+# Dump headers
+#
+# $qf->dumpheaders( [$ofh] )
+
+sub dumpheaders {
+    my $qf = shift;
+    my( $flags, $ofh, $raw ) = @_;
+
+    $ofh ||= \*STDOUT;
+
+    foreach my $h ( @{ $qf->{qe}{H} } ) {
+
+        # 0x81 indicates macro expansion.
+        # Present as '$' -- and quote any '$' as '\$'
+        my $txt = $h->{H};
+        $txt =~ s/([\$\x81])/$1 eq '$'? '\\$':'$'/ge unless( $raw );
+        print $ofh ( "$txt\n" );
+
+        if( $flags && keys %{ $h->{F} } ) {
+            my $txt = _pflags( \%hdrFlags, $h->{F} );
+            my $ph = '--> ';
+            $txt =~ s/^/$ph/gm;
+            chomp $txt;
+            print $ofh ( $txt, "\n" );
+        }
+    }
+    return 1;
+}  # dumpheaders
+
+# Dump message body
+
+sub has_body {
+    my $qf = shift;
+
+    return 1 if( $qf->{dfh} );
+    return;
+}
+
+sub bodyfh {
+    my $qf = shift;
+
+    my $fh = $qf->{dfh};
+    return unless( $fh );
+
+    seek( $fh, 0, SEEK_SET ) or croak( "$qf->{B}: seek - $!\n" );
+    return $fh;
+}
+
+sub dumpbody {
+    my $qf = shift;
+    my( $limit, $ofh ) = @_;
+
+    my $fh = $qf->bodyfh;
+
+    unless( $fh ) {
+        warn( "<<Body file is not available>>\n" );
+        return;
+    }
+
+    $ofh ||= \*STDOUT;
+
+    if( defined $limit ) {
+        while( <$fh> ) {
+            last if( $. > $limit );
+            print $ofh ( $_ );
+        }
+    } else {
+        print $ofh ( $_ ) while( <$fh> );
+    }
+
+    return 1;
+}
+
+# Dump delivery transcript
+
+sub has_transcript {
+    my $qf = shift;
+
+    return 1 if( $qf->{xfh} );
+    return;
+}
+
+sub transcriptfh {
+    my $qf = shift;
+
+    my $fh = $qf->{xfh};
+    return unless( $fh );
+
+    seek( $fh, 0, SEEK_SET ) or croak( "$qf->{_xf}: seek - $!\n" );
+    return $fh;
+}
+
+sub dumptranscript {
+    my $qf = shift;
+    my( $ofh ) = @_;
+
+    my $fh = $qf->transcriptfh;
+
+    return unless( $fh );
+
+    $ofh ||= \*STDOUT;
+
+    print $ofh ( "Transcript:\n" );
+    print $ofh ( $_ ) while( <$fh> );
+
+    return 1;
+}
+
+# Print flags ( $table, $hash, $one-line )
+
+sub _pflags {
+    my( $ft, $v, $o ) = @_;
+
+    my $txt = '';
+    my $eol = $o ? ', ' : "\n";
+
+    foreach my $f ( sort keys %$v ) {
+        if( $ft->{$f} ) {
+            $txt .= sprintf( "%s - %s%s",
+                             $f, $ft->{$f}, $eol );
+        } else {
+            $txt .= "$f - <unknown>$eol";
+        }
+    }
+    if( $o && length $txt ) {
+        my $ell = length $eol;
+        substr( $txt, -$ell, $ell, '' );
+    }
+    return $txt;
+}
+
+# Print date
+
+sub _pdate {
+    my( $qe, $k, $v ) = @_;
+
+    return strftime( '%a %d-%b-%Y %T %z (%Z)', localtime( $v ) );
+}
+
+# Print time difference
+
+sub _pdelta {
+    my( $qe, $k, $v, $o, $p ) = @_;
+
+    $p ||= '';
+    my $txt = sprintf( "%${p}d (", $v );
+    if( $v < 0 ) {
+        $txt .= '-';
+    } elsif( $p ) {
+        $txt .= $p;
+    }
+    $v = abs( $v );
+    my @abv = ( 'y' => 86400 * 365,  # Leap year(s) not included
+                'w' => 86400 * 7,
+                'd' => 86400,
+                'h' => 3600,
+                'm' => 60,
+                's' => 1 );
+    while( ( my( $c, $n ) = splice( @abv, 0, 2 ) ) ) {
+        next if( $v < $n );
+        $txt .= sprintf( '%u%s', $v / $n, $c );
+        $v %= $n;
+    }
+    $txt .= '0s' unless( $txt =~ /\([+-]?\d/ );
+    return $o ? "$txt)" : "$txt)\n";
+}
+
+# Permissions
+
+sub _pperms {
+    my( $mode ) = @_;
+
+    my @text = ( qw(--- --x -w- -wx r-- r-x rw- rwx) );
+## no critic ProhibitLeadingZeros
+    my $setids = ( $mode & 07000 ) >> 9;
+    @text = @text[
+        ( $mode & 0700 ) >> 6,
+        ( $mode & 0070 ) >> 3,
+        ( $mode & 0007 ) ];
+    $text[0] =~ s/([-x])$/$1 eq 'x' ? 's' : 'S'/e
+        if( $setids & 04 );
+    $text[1] =~ s/([-x])$/$1 eq 'x' ? 's' : 'S'/e
+        if( $setids & 02 );
+    $text[2] =~ s/([-x])$/$1 eq 'x' ? 't' : 'T'/e
+        if( $setids & 01 );
+## use critic
+    return join( '', @text );
+}
+
+package TL::SmqDecode::Entry;
+
+use warnings;
+use strict;
+
+# A queue entry specification as resolved from the comand line.
+#
+# Contains the data, control, and transcript directories that
+# are related to the entry as well as the control filename.
+
+sub new {
+    my $class = shift;
+
+#    my( $dfd, $qfd, $xfd, $fn ) = @_;
+
+    return bless [@_], $class;
+}
+
+# data (body) file directory
+
+sub dfd { return shift->[0]; }
+
+# control (queue) file directory
+
+sub qfd { return shift->[1]; }
+
+# transcript file directory
+
+sub xfd { return shift->[2]; }
+
+# file name
+
+sub fn { return shift->[3]; }
+
+package TL::SmqDecode;
+
+use warnings;
+use strict;
+
+use File::Basename;
+use Carp;
+use File::Spec;
+
+#use Errno; $!{ENOENT}
+#use IO::Handle;
+
+# Forward references
+
+sub new;
+sub open;
+sub entries;
+
+# Constructor for SmqDecode
+#
+# [ \%options, ] [@entry_specifiers]
+#
+# options:
+# config= path to sendmail.cf
+# qdir  = queued mail directory
+# type  = regexp matching front of files to select (e.g. qr/[qht]/)
+# warn  = true enables warnings
+
+sub new {
+    my $class = shift;
+    my $opts;
+
+    if( ref $_[0] ) {
+        $opts = shift;
+        my %valid = ( map { $_ => 1 } ( qw/config debug qdir skip type warn/ ) );
+        foreach my $opt ( keys %$opts ) {
+            croak( "$opt: invalid option for " . __PACKAGE__ . "::new\n" )
+                unless( $valid{$opt} );
+        }
+    } else {
+        $opts = {};
+    }
+
+    my @args = @_;
+
+    my $self = { entries => [],
+                 opts    => $opts, };
+
+    # Find default queue directory in sendmail's configuration
+
+    unless( defined $opts->{qdir} ) {
+        if( CORE::open( my $fh, '<', $opts->{config} || $dcfg ) ) {
+            while( <$fh> ) {
+                if( /^O QueueDirectory=(.*)$/ ) {
+                    $ddir = $1;  # Use last if more than one
+                }
+            }
+            close $fh;
+        } else {
+            if( defined $opts->{config} ) {
+                die( "$opts->{config}: open - $!\n" );
+            }
+        }
+        $opts->{qdir} = $ddir;
+    }
+    unless( -d $opts->{qdir} ) {
+        die( "$opts->{qdir}: not a dierctory\n" );
+    }
+
+    # Find any relocated spool directories
+
+    $self->{dfd} = File::Spec->catdir( $opts->{qdir}, 'df' );
+    $self->{dfd} = $opts->{qdir} unless( -d $self->{dfd} );
+
+    $self->{qfd} = File::Spec->catdir( $opts->{qdir}, 'qf' );
+    $self->{qfd} = $opts->{qdir} unless( -d $self->{qfd} );
+
+    $self->{xfd} = File::Spec->catdir( $opts->{qdir}, 'xf' );
+    $self->{xfd} = $opts->{qdir} unless( -d $self->{xfd} );
+
+    # Process or generate @args's list of queue entries
+    #
+    # queue filename, ident, or path
+
+    if( @args ) {
+    ARG:
+        foreach ( @args ) {
+            if( /^([qht]f)?[a-zA-Z0-9]+$/ ) {
+
+                # Control filename (in queue directory)
+                if( defined $1 ) {
+                    my $fn = File::Spec->catfile( $self->{qfd}, $_ );
+                    unless( -f $fn ) {
+                        warn( "$_: not found in $self->{qfd}\n" ) if( $opts->{warn} );
+                        undef $_;
+                        next;
+                    }
+                    $_ = TL::SmqDecode::Entry->new( @{$self}{qw/dfd qfd xfd/}, $_ );
+                    next;
+                }
+
+                # Id. Look for matching control file
+                foreach my $type ( qw/qf hf tf/ ) {
+                    my $fn = File::Spec->catfile( $self->{qfd}, "$type$_" );
+                    if( -f $fn ) {
+                        $_ =
+                            TL::SmqDecode::Entry->new( @{$self}{qw/dfd qfd xfd/},
+                                                       "$type$_" );
+                        next ARG;
+                    }
+                }
+                warn( sprintf( "$_: no matching files found\n" ) ) if( $opts->{warn} );
+                undef $_;
+                next;
+            }
+
+            # Control filename (anywhere in the file system)
+            if( basename( $_ ) =~ /^([qht]f)?[a-zA-Z0-9]+$/ ) {
+                my $fn = File::Spec->rel2abs( $_ );
+                unless( -f $fn ) {
+                    warn( "$_: not found\n" ) if( $opts->{warn} );
+                    undef $_;
+                }
+                my $bd  = dirname( $fn );  # Base queue directory, assume qf location
+                my $dsc = [];              # df qf xf
+                $dsc->[1] = $bd;           # qf location
+
+                $bd = dirname( $bd ) if( basename( $bd ) eq 'qf' );  # Up if in a qf/
+
+                # Set data (body) file directory
+                $dsc->[0] = ( -d File::Spec->catdir( $bd, 'df' )
+                              ? File::Spec->catdir( $bd, 'df' )
+                              : $bd );
+
+                # Set transcript directory
+                $dsc->[2] = ( -d File::Spec->catdir( $bd, 'xf' )
+                              ? File::Spec->catdir( $bd, 'xf' )
+                              : $bd );
+                push @$dsc, basename( $fn );
+                $_ = TL::SmqDecode::Entry->new( @$dsc );
+                next;
+            }
+            warn( "$_: Can't be a queue file name\n" );
+            $_ = undef;
+        }  # each ARGV
+        @args = grep { defined } @args;
+    } else {  # Nothing specified, scan queue directory
+        if( opendir( my $dh, $self->{qfd} ) ) {
+            while( defined( $_ = readdir( $dh ) ) ) {
+                my $fn = File::Spec->catfile( $self->{qfd}, $_ );
+                next unless( /^$opts->{type}f[a-zA-Z0-9]+$/ && -f $fn );
+                push @args, $_;
+            }
+            closedir( $dh );
+            @args = map {
+                TL::SmqDecode::Entry->new( $self->{dfd}, $self->{qfd}, $self->{xfd}, $_ )
+            } sort @args if( @args );
+        } else {
+            die( "$self->{qfd} - opendir: $!\n" );
+        }
+    }
+    warn( "No matching files found\n" ) if( !@args && $opts->{warn} );
+
+    $self->{entries} = [@args];
+    bless $self, $class;
+    return $self;
+}  # new
+
+# List of queue entries to be processed
+
+sub entries { return @{ shift->{entries} }; }
+
+# Open an entry's files, producing a Qf object
+
+sub open {
+    my $self = shift;
+    my( $entry ) = @_;
+
+    return TL::SmqDecode::Qf->new( $entry, $self->{opts} );
+}
+
+package main;
+
+use warnings;
+use strict;
+
+sub _matchval;
+sub _matchnum;
+
+unless( __FILE__ =~ /\.pm$/ ) {
+    File::Basename->import( qw/basename/ );
+
+    # Command-line interface
+
+    # Options
+
+    require Getopt::Long;
+    Getopt::Long->import( qw/GetOptions :config bundling/ );
+
+    my( $meta,  $headers, $body, $transcript,
+        $flags, $limit,   $debug,
+        $help,  $man,     $version, ) = ( 0, 1, 0, 0, );
+
+    my %opts = ( type => qr/[q]/ );
+
+    GetOptions(
+        'body|b!'       => \$body,
+        'config|C=s'    => \$opts{config},
+        'debug|d!'      => \$debug,
+        'flags|f!'      => \$flags,
+        'headers|h!'    => \$headers,
+        'help|?'        => \$help,
+        'man'           => \$man,
+        'metadata|m!'   => \$meta,
+        'queue|q=s'     => \$opts{qdir},
+        'skip-busy|s!'  => \$opts{skip},
+        'transcript|t!' => \$transcript,
+        'version'       => \$version,
+        'warnings|w!'   => \$opts{warn},
+        'message|M!'    => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
+        'limit-body|l=s' => sub { $limit = _matchnum( @_ ) },
+        'type|T=s' => sub {
+            $opts{type} = _matchval( @_[ 0, 1 ],
+                                     all         => qr/[qht]/,
+                                     pended      => qr/[q]/,
+                                     quarantined => qr/[h]/,
+                                     queued      => qr/[q]/,
+                                     temporary   => qr/[t]/, );
+        }, ) or
+        die( "Command line error, --help for usage\n" );
+
+    # Documentation actions
+
+    if( $help || $man ) {
+        eval { require Pod::Usage } or
+            die( "Install Pod::Usage or use 'perldoc $0'\n" );
+        Pod::Usage::pod2usage( 1 ) if $help;
+        Pod::Usage::pod2usage( -exitval => 0, -verbose => 2 ) if $man;
+    }
+    if( $version ) {
+        print( basename( $0 ) . " version $VERSION\n$copyright" );
+        exit;
+    }
+
+    # Find specified entries
+
+    my $smq = TL::SmqDecode->new( \%opts, @ARGV );
+
+    # Execute selected commands
+
+    my $sep = "";
+    foreach my $f ( $smq->entries ) {
+        if( $smq->entries > 1 ) {
+            print( $sep );
+            $sep = "\n";
+            print( '# ', '-' x 80, "\n" );
+            printf( "# %s\n", File::Spec->catfile( $f->qfd, $f->fn ) );
+            print( '# ', '-' x 80, "\n" );
+        }
+        my $qf = $smq->open( $f );
+        next unless( $qf );
+
+        $qf->dumpmeta if( $meta );
+        if( $headers ) {
+            print( "\n" ) if( $meta );
+            $qf->dumpheaders( $flags );
+        }
+        if( $body ) {
+            print( "\n" ) if( $meta || $headers );
+            $qf->dumpbody( $limit );
+        }
+        if( $transcript && $qf->has_transcript ) {
+            print( "\n" ) if( $meta || $headers || $body );
+            $qf->dumptranscript;
+        }
+        if( $debug ) {
+            print( "\n" )
+                if(    $meta
+                    || $headers
+                    || $body
+                    || ( $transcript && $qf->has_transcript ) );
+            require Data::Dumper;
+            no warnings 'once';  ## no critic ProhibitNoStrict
+            local $Data::Dumper::Sortkeys = 1;
+            print Data::Dumper::Dumper( $qf->{qe} );
+        }
+    }
+    exit;
+}
+
+# Match a keyword value, with unique abbreviation
+
+sub _matchval {
+    my( $name, $val, @eqv ) = @_;
+
+    my @match;
+    while( ( my( $key, $rv ) = splice( @eqv, 0, 2 ) ) ) {
+        if( $key =~ /^\Q$val\E/ ) {
+            die( qq(Ambiguous --$name: "$val" ("$match[0]", "$key")\n) )
+                if( @match );
+            @match = ( $key, $rv );
+        }
+    }
+    die( qq(Invalid --$name: "$val"\n) ), unless( @match );
+    return $match[1];
+}
+
+# Match a numeric value, allowing 'none' as well as hex, octal, decimal
+
+sub _matchnum {
+    my( $name, $val ) = @_;
+
+    $val =~ /^(?:(n(?:o(?:ne?)?)?)|(0x[[:xdigit:]]+|0[0-7]*|[1-9]\d*))$/i or
+        die( qq(--$name: Invalid value "$val"\n) );
+    return if( $1 );
+    my $n = $2;
+    return oct( $n ) if( $n =~ /^0/ );
+    return $n;
+}
+
+1;
+__END__
+
+=pod
+
+=head1 NAME
+
+smqdecode - Decode and extract sendmail queue entries
+
+=head1 SYNOPSIS
+
+ smqdecode --body    --config   --flags   --headers
+           --limit-body=[N,none] --message --metadata --skip-busy
+           --queue   --warnings  --type=[all,pended,quarantined,temporary]
+           --help    --man       --version
+
+ smqdecode --meta x0VKKEWx032646 qfx0VKKEWx032647 /foo/hfx0VKKEWx032649
+
+ smqdecode --headers --body  x0VKKEWx032646
+
+=head1 DESCRIPTION
+
+I<smqdecode> allows you to inspect a F<sendmail> message queue.  For
+each message, it can:
+
+=over 4
+
+=item decode metadata
+
+The metadata consists of information about the queue entry, such as
+its type, its age, why it is waiting, and envelope data.  It is stored
+in various encoded forms, but is presented in a more readable format.
+
+=item extract message headers
+
+The message headers and body are stored separately in queue entries.
+In a queue entry, the headers are stored with associated metadata.
+This makes it impossible to analyze the headers with ordinary tools.
+
+I<smqdecode> can extract and present the headers in the same format
+that would be used if the message were successfully delivered.
+
+In some cases, headers contain codes indicating that macro expansion
+is to be performed.  These are displayed as I<$>; an actual I<$> is
+displayed as I<\$>.
+
+=item extract message body
+
+Output the message body as transmitted.
+
+=item view transcript
+
+Output any processing transcript associated with a message.
+
+=back
+
+=head1 OPTIONS
+
+The following options are provided.  The short and long forms of
+each option have the same effect.  The long form of a boolean
+option can be negated by specifying it as B<-->noB<OPTION>.
+
+The defaults are --nometadata --headers --nobody --nowarn --nolimit-body.
+
+=over 4
+
+=item B<-b> B<--body>
+
+Output the body of each message.
+
+If B<--max-data> is also specified, output no more than that number of lines of each message.  Otherwise, output the entire message body.
+
+=item B<-C> B<--config>=F<FILE>
+
+Obtain the default message queue's directory by reading F<FILE>, which is a F<sendmail.cf> file.  The default is F</etc/mail/sendmail.cf>.
+
+=item B<-d> B<--debug>
+
+Provides debugging information.
+
+=item B<-f> B<--flags>
+
+When decoding headers, include associated flags.
+
+Headers with associated flags will be followed by lines
+describing the flags, one per line.  Thes lines look like:
+
+    --> code - description
+
+They apply only to the preceding header.
+
+Note that this produces output that does not conform to the
+e-mail message format standards.
+
+=item B<-h> B<--headers>
+
+Output the message headers, formatted for message delivery.
+
+See also B<--flags>,
+
+=item B<--help>
+
+Display summary usage information.
+
+=item B<-l> B<--limit-body>=none|NUMBER
+
+Limit output of each message body  to NUMBER lines.  (Do not limit if 'none'
+is specified.  'none' is the default.)
+
+=item B<--man>
+
+Display complete usage information.
+
+=item B<-M> B<--message>
+
+Output both body and message,  Shortcut for --headers --body --limit=none.
+
+=item B<-m> B<--metadata>
+
+Output the (decoded) metadata for each queued message.
+
+=item B<-q> B<--queue>=DIR
+
+Look for the queue entries in F<DIR>.  The default is described for B<--config>
+
+=item B<-s> B<--skip-busy>
+
+Ignore queue entries that are locked or can't be opened.
+
+=item B<-T> B<--type>=TYPE
+
+When no specific file or queue ID is specified, files of TYPE
+are processed.  TYPE can be one of the following:
+
+=over 4
+
+=item B<all>
+
+All types listed below.
+
+=item B<pended>
+
+Queue entries that have not been attempted, or which encountered
+a transient error.  This is the default, and normally, the largest
+category.  B<queued> is an alias for B<pended> (user requested).
+
+=item B<quarantined>
+
+Queue entries that have been held by a sendmail milter, typically
+an anti-virus or anti-spam scanner.  It is sometimes necessary to
+examine these for false positives before deleting, bouncing, or
+approving them.  (See I<qtool> for taking these actions.)
+
+=item B<temporary>
+
+Temporary copies of queue entries.  These transient files are
+used when sendmail rewrites a queue entry, and are likely
+retained when there has been an inopportune crash.
+
+=back
+
+B<--type> has no effect when a file or queue ID is specified.
+
+=item B<-w> B<--warnings>
+
+Display warning messages, e.g. when a queue control file contains
+an unrecognized record type.
+
+=back
+
+=head1 RETURN VALUE
+
+The exit value is zero for success, and non-zero for errors.
+
+=head1 FILES
+
+The primary input files are the queue entries in the specified
+queue directory.
+
+As with I<sendmail>, if the specified queue directory contains
+one or more directories named F<df/>, F<qf/>, and/or F<xf/>,
+they will be used for the the data, control, and/or transcript
+files respectively.  If any of these directories does not
+exist, the respective files are located in the queue directory.
+
+Input files can be specified in several ways:
+
+=over 4
+
+=item by queue ID
+
+This is the Q-ID displayed by the F<mailq> command.
+
+The queue directory is searched for all supported control
+files with the specified ID. The first found is used.
+
+=item by control file name
+
+This is the queue ID prepended by the file type code, one of:
+F<qf>, F<hf>, F<tf>.  Other file types are not supported.
+
+The queue directory is searched for the specified file.
+
+=item by path
+
+Specify a path (relative or absolute) to a control file.
+Relative paths are based on the current working directory.
+
+The filename must be a supported type.
+
+If the directory containg the control file is named F<qf>,
+the directory that contains it is used as the queue
+directory when looking for related files.  E.g.
+
+ Specify: tests/qf/qfxabcd
+ Data, transcript: tests/df/dfxabcd tests/xf/xfxabcd
+ or
+ Data, transcript: tests/dfxabcd tests/xfabcd
+
+=item by default
+
+By default, all control files in the queue directory
+matching B<--type> are processed.
+
+=back
+
+If multiple entries are specified on the command line, any
+mixture of specification types can be used.
+
+=head2 Output
+
+Decoded output is to F<stdout>.
+
+Errors are reported on F<stderr>.
+
+=head1 API
+
+Internally, command arguments and queue files are parsed into
+objects in the TL::SmqDecode namespace.  The object interface
+is currently experimental and may not evolve upward-compatibly.
+
+To experiment with the API, symlink the F<smqdecode> script
+to F<E<lt>PERL5LIBE<gt>/TL/SmqDecode.pm>, e.g.:
+
+  mkdir -p /opt/sbin
+  cp -p smqdecode /opt/sbin/
+  mkdir -p /usr/lib/perl5/site_perl/5.28.0/TL
+  ln -s ../../../../../../opt/sbin/smqdecode \
+       /usr/lib/perl5/site_perl/5.28.0/TL/SmqDecode.pm
+  --
+  use TL::SmqDecode;
+
+  my $smq = TL::SmqDecode->new( { qdir => '/var/spool/altqueue' }, @ARGV );
+  foreach my $f ( $smq->entries ) {
+    my $qf = $smq->open( $f );
+    $qf->dumpmeta;
+    $pri{ $qf->priority }++;
+  }
+
+Note that, assuming F</opt/sbin> is in your F<PATH>, the same copy
+of the script is used for the command line and for the Perl module.
+
+=head1 BUGS
+
+Report any bugs, feature requests and/or patches on the issue tracker,
+located at F<https://github.com/tlhackque/smqdecode/issues>.  In the
+event that the project moves, contact the author directly.
+
+=head1 AUTHOR
+
+Timothe Litt  E<lt>litt@acm.orgE<gt>
+
+=head1 COPYRIGHT and LICENSE
+
+Copyright (c) 2019 Timothe Litt
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+Except as contained in this notice, the name of the author shall not be
+used in advertising or otherwise to promote the sale, use or other dealings
+in this Software without prior written authorization from the author.
+
+Any modifications to this software must be clearly documented by and
+attributed to their author, who is responsible for their effects.
+
+Bug reports, suggestions and patches are welcomed by the original author.
+
+=head1 SEE ALSO
+
+I<sendmail(8)> I<mailq(1)> I<sendmail, 4th Edition (O'Reilly)>> I<qtool(8)>
+
+=cut

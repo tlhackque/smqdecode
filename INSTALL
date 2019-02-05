@@ -1,0 +1,9 @@
+To install the smqdecode command, copy the script to any directory in your
+PATH.
+
+All modules used are core modules (distributed with Perl), and require no
+installation.
+
+To use the API, see the manual (smqdecode --man) for additional instructions.
+
+Read the LICENSE file.
