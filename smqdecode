@@ -12,7 +12,7 @@ Copyright (C) 2019 Timothe Litt <litt at acm.org>
 Use --man for license information.
 COPYRIGHT
 
-our $VERSION = 'V1.001';
+our $VERSION = 'V1.002';
 
 # License is in the POD at the end of this file.
 
@@ -132,18 +132,18 @@ my @meta = (
         sub {
             my( $qe, $k, $v ) = @_;
 
-            return
-                sprintf( "%s Size: %u, Permissions: %s",
-                         $qe->{_fname}, $v,
-                         _pperms( $qe->{_qperm} ) );
-            }
+            return sprintf(
+                "%s Size: %u, Permissions: %s",
+                $qe->{_fname}, $v,
+                _pperms( $qe->{_qperm} ) );
+        }
     ],
     _type => [
         Type => sub {
             return { 'q' => 'Queued mail',
                      'h' => 'Quarantined mail',
                      't' => 'Temporary queue entry', }->{ $_[2] };
-            }
+        }
     ],
     V => [
         'Version',
@@ -163,31 +163,31 @@ my @meta = (
     T    => [ 'Arrival Date' => \&_pdate ],
     _age => [ 'Age'          => \&_pdelta ],
     N    => 'Attempts',
-    K    => [
+    K => [
         'Last Attempt' => sub {
             return 'none' if( $_[2] == 0 );
             return _pdate( @_ );
-            }
-         ],
+        }
+    ],
     _elapsed => [ 'Elapsed' => \&_pdelta ],
     Y        => 'Current delay',
-    '!'      => [
+    '!' => [
         'Deliver by',
         sub {
             my( $qe, $k, $v ) = @_;
 
-            return
-                sprintf( '%s delta: %s mode: %s',
-                         _pdate( $qe, $k, $v->{due} ),
-                         _pdelta( $qe, $k, $v->{delta}, 1, '+' ),
-                         _pflags( \%rtnFlags, $v->{mode}, 1 ) );
-            }
-           ],
+            return sprintf(
+                '%s delta: %s mode: %s',
+                _pdate( $qe, $k, $v->{due} ),
+                _pdelta( $qe, $k, $v->{delta}, 1, '+' ),
+                _pflags( \%rtnFlags, $v->{mode}, 1 ) );
+        }
+    ],
 
-    P      => [ 'Priority', '%d.' ],
-    M      => 'Reason',
-    'q'    => 'Quarantine',
-    D      => 'Data filename',
+    P   => [ 'Priority', '%d.' ],
+    M   => 'Reason',
+    'q' => 'Quarantine',
+    D   => 'Data filename',
     _dname => [
         'Data file',
         sub {
@@ -195,23 +195,21 @@ my @meta = (
 
             my $txt = '';
             $txt = "$qe=>{d}/" if( defined $qe->{d} );
-            return $txt
-                .
-                sprintf( "%s Size: %u, Permissions: %s",
-                         $v, $qe->{_dsize},
-                         _pperms( $qe->{_dperm} ) );
-            }
+            return $txt . sprintf(
+                "%s Size: %u, Permissions: %s",
+                $v, $qe->{_dsize},
+                _pperms( $qe->{_dperm} ) );
+        }
     ],
     I => [
         'Data inode',
         sub {
             my( $v ) = $_[2];
 
-            return
-                sprintf( 'Major: %u, Minor: %u, Inode: %u',
-                         @{$v}{qw/major minor inode/} );
-            }
-         ],
+            return sprintf( 'Major: %u, Minor: %u, Inode: %u',
+                            @{$v}{qw/major minor inode/} );
+        }
+    ],
     B => 'Body type',
     L => 'Content length',
     C => 'Owner',
@@ -224,12 +222,12 @@ my @meta = (
         'Orphan ORCPT' => sub {
             my $v = $_[2];
 
-            return
-                sprintf( 'Type: %s Addr: %s',
-                         defined $v->[0] ? $v->[0] : 'unspecified',
-                         $v->[1] );
-            }
-         ],
+            return sprintf(
+                'Type: %s Addr: %s',
+                defined $v->[0] ? $v->[0] : 'unspecified',
+                $v->[1] );
+        }
+    ],
     R => [
         'Recipients',
         sub {
@@ -242,11 +240,12 @@ my @meta = (
                     $rt .= _pflags( \%Rflags, $r->{flags} );
                 }
                 if( $r->{or} ) {
-                    $rt .= sprintf( "ORCPT type: %s Addr: %s\n",
-                                    defined $r->{or}[0]
-                                    ? $r->{or}[0]
-                                    : 'unspecified',
-                                    $r->{or}[1] );
+                    $rt .= sprintf(
+                        "ORCPT type: %s Addr: %s\n",
+                        defined $r->{or}[0]
+                        ? $r->{or}[0]
+                        : 'unspecified',
+                        $r->{or}[1] );
                 }
                 if( length $rt ) {
                     $rt =~ s/^/  /gm;
@@ -254,18 +253,17 @@ my @meta = (
                 $txt .= "$r->{addr}\n$rt";
             }
             return $txt;
-            }
-         ],
+        }
+    ],
     r => [
         'Final recipient',
         sub {
             my $v = $_[2];
 
-            return
-                sprintf( 'Type: %s, Addr: %s',
-                         @{$v}{qw/type addr/} );
-            }
-         ],
+            return sprintf( 'Type: %s, Addr: %s',
+                            @{$v}{qw/type addr/} );
+        }
+    ],
     '$' => [
         'Macros',
         sub {
@@ -282,18 +280,18 @@ my @meta = (
                                  $m->{$k} );
             }
             return $txt;
-            }
-           ],
+        }
+    ],
     '_xf' => [
         'Transcript',
         sub {
             my( $qe, $k, $v ) = @_;
 
-            return
-                sprintf( "%s Size: %u, Permissions: %s",
-                         $v, $qe->{_xsize},
-                         _pperms( $qe->{_xperm} ) );
-            }
+            return sprintf(
+                "%s Size: %u, Permissions: %s",
+                $v, $qe->{_xsize},
+                _pperms( $qe->{_xperm} ) );
+        }
     ], );
 
 # Constructor for Qf
@@ -349,32 +347,33 @@ QF:
 
             my $unm = getpwuid( $uid );
             my $gnm = getgrgid( $gid );
-            $qe->{C} = sprintf( "%s:%s.%s%s",
-                                $user,
-                                defined $unm   ? $unm      : $uid,
-                                defined $gnm   ? $gnm      : $gid,
-                                defined $eaddr ? ":$eaddr" : '' );
+            $qe->{C} = sprintf(
+                "%s:%s.%s%s",
+                $user,
+                defined $unm   ? $unm      : $uid,
+                defined $gnm   ? $gnm      : $gid,
+                defined $eaddr ? ":$eaddr" : '' );
             next;
         }
-        if( m,^([Dd])(.+)$, ) {                     # data file name, path
+        if( m,^([Dd])(.+)$, ) {  # data file name, path
             $qe->{$1} = $2;
             next;
         }
-        if( /^F(.*)$/ ) {                           # Flags
+        if( /^F(.*)$/ ) {        # Flags
             $qe->{F} = { map { $_ => 1 } split( //, $1 ) };
             next;
         }
-        if( /^H(?:\?([^?]*)\?)?(.+)$/ ) {           # Header (optional delivery flags)
+        if( /^H(?:\?([^?]*)\?)?(.+)$/ ) {  # Header (optional delivery flags)
             push @{ $qe->{H} }, {
-                  F => { map { $_ => 1 } split( //, defined $1 ? $1 : '' ) },
-                  H => $2 };
+                               F => { map { $_ => 1 } split( //, defined $1 ? $1 : '' ) },
+                               H => $2 };
             while( <$fh> ) {
                 redo QF unless( /^(\s+.*)$/ );
                 $qe->{H}->[-1]{H} .= "\n$1";
             }
             last QF;
         }
-        if( m,^I(\d+)/(\d+)/(\d+)$, ) {             # Data file recovery
+        if( m,^I(\d+)/(\d+)/(\d+)$, ) {    # Data file recovery
             $qe->{I} = { major => $1, minor => $2, inode => $3 };
             next;
         }
@@ -630,7 +629,7 @@ sub dumpheaders {
 
         if( $flags && keys %{ $h->{F} } ) {
             my $txt = _pflags( \%hdrFlags, $h->{F} );
-            my $ph = '--> ';
+            my $ph  = '--> ';
             $txt =~ s/^/$ph/gm;
             chomp $txt;
             print $ofh ( $txt, "\n" );
@@ -728,8 +727,9 @@ sub _pflags {
 
     foreach my $f ( sort keys %$v ) {
         if( $ft->{$f} ) {
-            $txt .= sprintf( "%s - %s%s",
-                             $f, $ft->{$f}, $eol );
+            $txt .= sprintf(
+                "%s - %s%s",
+                $f, $ft->{$f}, $eol );
         } else {
             $txt .= "$f - <unknown>$eol";
         }
@@ -938,9 +938,8 @@ sub new {
                 foreach my $type ( qw/qf hf tf/ ) {
                     my $fn = File::Spec->catfile( $self->{qfd}, "$type$_" );
                     if( -f $fn ) {
-                        $_ =
-                            TL::SmqDecode::Entry->new( @{$self}{qw/dfd qfd xfd/},
-                                                       "$type$_" );
+                        $_ = TL::SmqDecode::Entry->new( @{$self}{qw/dfd qfd xfd/},
+                                                        "$type$_" );
                         next ARG;
                     }
                 }
@@ -1034,40 +1033,46 @@ unless( __FILE__ =~ /\.pm$/ ) {
 
     my( $meta,  $headers, $body, $transcript,
         $flags, $limit,   $debug,
-        $help,  $man,     $version, ) = ( 0, 1, 0, 0, );
+        $help,  $man,     $version, )
+        = ( 0, 1, 0, 0, );
 
     my %opts = ( type => qr/[q]/ );
 
     GetOptions(
-        'body|b!'       => \$body,
-        'config|C=s'    => \$opts{config},
-        'debug|d!'      => \$debug,
-        'flags|f!'      => \$flags,
-        'headers|h!'    => \$headers,
-        'help|?'        => \$help,
-        'man'           => \$man,
-        'metadata|m!'   => \$meta,
-        'queue|q=s'     => \$opts{qdir},
-        'skip-busy|s!'  => \$opts{skip},
-        'transcript|t!' => \$transcript,
-        'version'       => \$version,
-        'warnings|w!'   => \$opts{warn},
-        'message|M!'    => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
+        'body|b!'        => \$body,
+        'config|C=s'     => \$opts{config},
+        'debug|d!'       => \$debug,
+        'flags|f!'       => \$flags,
+        'headers|h!'     => \$headers,
+        'help|?'         => \$help,
+        'man'            => \$man,
+        'metadata|m!'    => \$meta,
+        'queue|q=s'      => \$opts{qdir},
+        'skip-busy|s!'   => \$opts{skip},
+        'transcript|t!'  => \$transcript,
+        'version'        => \$version,
+        'warnings|w!'    => \$opts{warn},
+        'message|M!'     => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
         'limit-body|l=s' => sub { $limit = _matchnum( @_ ) },
-        'type|T=s' => sub {
-            $opts{type} = _matchval( @_[ 0, 1 ],
-                                     all         => qr/[qht]/,
-                                     pended      => qr/[q]/,
-                                     quarantined => qr/[h]/,
-                                     queued      => qr/[q]/,
-                                     temporary   => qr/[t]/, );
+        'type|T=s'       => sub {
+            $opts{type} = _matchval(
+                @_[ 0, 1 ],
+                all         => qr/[qht]/,
+                pended      => qr/[q]/,
+                quarantined => qr/[h]/,
+                queued      => qr/[q]/,
+                temporary   => qr/[t]/, );
         }, ) or
         die( "Command line error, --help for usage\n" );
 
     # Documentation actions
 
     if( $help || $man ) {
-        eval { require Pod::Usage } or
+        eval {
+            no warnings 'once';
+            $Pod::Usage::Formatter = 'Pod::Text::Termcap';
+            require Pod::Usage;
+            } or
             die( "Install Pod::Usage or use 'perldoc $0'\n" );
         Pod::Usage::pod2usage( 1 ) if $help;
         Pod::Usage::pod2usage( -exitval => 0, -verbose => 2 ) if $man;
