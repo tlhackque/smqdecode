@@ -8,11 +8,11 @@ use warnings;
 use strict;
 
 my $copyright = << 'COPYRIGHT';
-Copyright (C) 2019 Timothe Litt <litt at acm.org>
+Copyright (C) 2019,2020 Timothe Litt <litt at acm.org>
 Use --man for license information.
 COPYRIGHT
 
-our $VERSION = 'V1.002';
+our $VERSION = 'V1.003';
 
 # License is in the POD at the end of this file.
 
@@ -23,6 +23,7 @@ our $VERSION = 'V1.002';
 
 my $ddir = '/var/spool/mqueue';
 my $dcfg = '/etc/mail/sendmail.cf';
+my $scfg = '/etc/mail/submit.cf';
 
 package TL::SmqDecode::Qf;
 
@@ -898,9 +899,10 @@ sub new {
         }
         $opts->{qdir} = $ddir;
     }
-    unless( -d $opts->{qdir} ) {
-        die( "$opts->{qdir}: not a dierctory\n" );
+    unless( defined $opts->{qdir} && -d $opts->{qdir} ) {
+        die( "$opts->{qdir}: not a directory\n" );
     }
+    printf( "# Default directory is %s\n", $opts->{qdir} ) if( $opts->{debug} );
 
     # Find any relocated spool directories
 
@@ -1031,27 +1033,28 @@ unless( __FILE__ =~ /\.pm$/ ) {
     require Getopt::Long;
     Getopt::Long->import( qw/GetOptions :config bundling/ );
 
-    my( $meta,  $headers, $body, $transcript,
-        $flags, $limit,   $debug,
+    my( $meta,  $headers, $body,  $transcript,
+        $flags, $limit,   $debug, $submit,
         $help,  $man,     $version, )
         = ( 0, 1, 0, 0, );
 
     my %opts = ( type => qr/[q]/ );
 
     GetOptions(
-        'body|b!'        => \$body,
-        'config|C=s'     => \$opts{config},
-        'debug|d!'       => \$debug,
-        'flags|f!'       => \$flags,
-        'headers|h!'     => \$headers,
-        'help|?'         => \$help,
-        'man'            => \$man,
-        'metadata|m!'    => \$meta,
-        'queue|q=s'      => \$opts{qdir},
-        'skip-busy|s!'   => \$opts{skip},
-        'transcript|t!'  => \$transcript,
-        'version'        => \$version,
-        'warnings|w!'    => \$opts{warn},
+        'body|b!'            => \$body,
+        'config|C=s'         => \$opts{config},
+        'debug|d!'           => \$debug,
+        'flags|f!'           => \$flags,
+        'headers|h!'         => \$headers,
+        'help|?'             => \$help,
+        'man'                => \$man,
+        'metadata|m!'        => \$meta,
+        'queue|q=s'          => \$opts{qdir},
+        'skip-busy|s!'       => \$opts{skip},
+        'submission|submit!' => \$submit,
+        'transcript|t!'      => \$transcript,
+        'version'            => \$version,
+        'warnings|w!'        => \$opts{warn},
         'message|M!'     => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
         'limit-body|l=s' => sub { $limit = _matchnum( @_ ) },
         'type|T=s'       => sub {
@@ -1082,6 +1085,9 @@ unless( __FILE__ =~ /\.pm$/ ) {
         exit;
     }
 
+    $dcfg = $scfg if( $submit );
+    $opts{debug} = $debug;
+
     # Find specified entries
 
     my $smq = TL::SmqDecode->new( \%opts, @ARGV );
@@ -1090,7 +1096,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
 
     my $sep = "";
     foreach my $f ( $smq->entries ) {
-        if( $smq->entries > 1 ) {
+        if( $smq->entries > 1 || $debug ) {
             print( $sep );
             $sep = "\n";
             print( '# ', '-' x 80, "\n" );
@@ -1169,7 +1175,7 @@ smqdecode - Decode and extract sendmail queue entries
 
 =head1 SYNOPSIS
 
- smqdecode --body    --config   --flags   --headers
+ smqdecode --body    --config   --flags   --headers   --submission
            --limit-body=[N,none] --message --metadata --skip-busy
            --queue   --warnings  --type=[all,pended,quarantined,temporary]
            --help    --man       --version
@@ -1232,7 +1238,7 @@ If B<--max-data> is also specified, output no more than that number of lines of 
 
 =item B<-C> B<--config>=F<FILE>
 
-Obtain the default message queue's directory by reading F<FILE>, which is a F<sendmail.cf> file.  The default is F</etc/mail/sendmail.cf>.
+Obtain the default message queue's directory by reading F<FILE>, which is a F<sendmail.cf> file.  The default is F</etc/mail/sendmail.cf> or F</etc/mail/submit.cf>.
 
 =item B<-d> B<--debug>
 
@@ -1286,6 +1292,10 @@ Look for the queue entries in F<DIR>.  The default is described for B<--config>
 =item B<-s> B<--skip-busy>
 
 Ignore queue entries that are locked or can't be opened.
+
+=item B<--submission> B<--submit>
+
+Look at the submission (client) queue rather than the server queue.
 
 =item B<-T> B<--type>=TYPE
 
