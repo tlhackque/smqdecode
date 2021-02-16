@@ -39,6 +39,9 @@ smqdecode can also be used as a Perl module which provides an API
 for examining messages in a queue.  This is an experimental feature.
 Use --man for documentation.
 
+Also included is the quarantineck bash script, which can be used to
+monitor the quarantine queue.
+
 See the LICENSE file for the license associated with all files in
 this distribution.
 

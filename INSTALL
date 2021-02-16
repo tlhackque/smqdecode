@@ -6,4 +6,7 @@ installation.
 
 To use the API, see the manual (smqdecode --man) for additional instructions.
 
+The quarantineck script can be called as a cron job to monitor the quarantine
+queue.  It assumes that smqdecode is installed in the same directory.
+
 Read the LICENSE file.
