@@ -10,7 +10,7 @@ QD="/var/spool/mqueue"
 if [ -x "$SMQ" -a -d "$QD" ]; then
     FOUND=0
     while read ; do
-        if [ -z "$FOUND" ]; then echo "Quarantined e-mail"; fi
+        if [ "$FOUND" == 0 ]; then echo "Quarantined e-mail"; fi
         echo
         ((FOUND++))
 
@@ -20,9 +20,17 @@ if [ -x "$SMQ" -a -d "$QD" ]; then
 
         # Select interesting headers and indent
 
-        $SMQ "$REPLY" | \
-            grep -iP '^(From|Date|To|Subject|Message-ID|X-Virus-Status):' | \
+        $SMQ --queue=$QD --headers --nobody --nowarn --nometadata "$REPLY" | \
+            grep -iP '^(From|Date|To|Subject|Message-ID|X-Virus-Status):'  | \
             sed -e 's/^/    /g'
+
+        # Command to view this e-mail
+
+        echo "    View: $SMQ --queue=$QD --message --limit-body=none ${REPLY:2} | less"
+
+        # Command to release from quarantine & deliver
+
+        echo "    Release: sendmail -qQ -qI${REPLY:2}"
     done < <( find "$QD" -maxdepth 1 -type f -name "hf*" -printf '%f\n' )
 
     if [ $FOUND -gt 0 ]; then
