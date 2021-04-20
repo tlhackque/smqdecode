@@ -26,7 +26,11 @@ if [ -x "$SMQ" -a -d "$QD" ]; then
 
         # Command to view this e-mail
 
-        echo "    View: $SMQ --queue=$QD --message --limit-body=none ${REPLY:2} | less"
+        echo "    View   : $SMQ --queue=$QD --message --limit-body=none ${REPLY:2} | less"
+
+        # Command to remove from quarantine & delete immediately
+
+        echo "    Delete : rm -f $QD/{d,h}${REPLY:1}"
 
         # Command to release from quarantine & deliver
 
