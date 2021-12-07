@@ -4,12 +4,41 @@
 
 # Check for non-empty quarantine queue & report
 
-SMQ="`dirname $0`/smqdecode"
-QD="/var/spool/mqueue"
+# Locate smqdecode - check same place as this script, then try PATH
 
-if [ -x "$SMQ" -a -d "$QD" ]; then
+SMQ="$(dirname "$0")/smqdecode"
+if ! [ -x "$SMQ" ]; then
+    SMQ="$(which smqdecode 2>/dev/null)"
+fi
+QD=
+
+# Look for Queue directory in sendmail.cf, then default
+
+if [[ -n "$SMQ" && -x "$SMQ" ]]; then
+    SMCONFIG=
+    for DIR in /opt/etc/mail /usr/local/etc/mail /etc/mail; do
+        if [ -f "$DIR/sendmail.cf" ]; then
+            SMCONFIG="$DIR/sendmail.cf"
+            break;
+        fi
+    done
+
+    if [[ -n "$SMCONFIG" && -f "$SMCONFIG" ]]; then
+        QD="$(grep '^O QueueDirectory=' /etc/mail/sendmail.cf | tail -n 1)"
+        if [[ "$QD" =~ ^O\ QueueDirectory=(.*)$ ]]; then
+            QD="${BASH_REMATCH[1]}"
+        else
+            QD=
+        fi
+    fi
+    [ -z "$QD" ] && QD="/var/spool/mqueue"
+fi
+
+# If have smqdecode && queue directory, look there for quarantined mail
+
+if [[ -n "$QD" && -d "$QD" ]]; then
     FOUND=0
-    while read ; do
+    while read -r ; do
         if [ "$FOUND" == 0 ]; then echo "Quarantined e-mail"; fi
         echo
         ((FOUND++))
@@ -30,14 +59,14 @@ if [ -x "$SMQ" -a -d "$QD" ]; then
 
         # Command to remove from quarantine & delete immediately
 
-        echo "    Delete : rm -f $QD/{d,h}${REPLY:1}"
+        echo "    Delete : $SMQ --queue=$QD --delete ${REPLY:2}"
 
         # Command to release from quarantine & deliver
 
         echo "    Release: sendmail -qQ -qI${REPLY:2}"
     done < <( find "$QD" -maxdepth 1 -type f -name "hf*" -printf '%f\n' )
 
-    if [ $FOUND -gt 0 ]; then
+    if [ "$FOUND" -gt 0 ]; then
         exit 0
     elif [ -z "$CRONJOB" ]; then
         echo "Quarantine is empty"
@@ -49,11 +78,10 @@ fi
 
 # Fallback to mailq
 
-L="`mailq -qQ 2>&1`"
-if [ -n "$CRONJOB" ] && echo "$L" | grep -qP '^\s*Total\srequests:\s+0'; then
+L="$(mailq -qQ 2>&1)"
+if [ -n "$CRONJOB" ] && grep -qP '^\s*Total\srequests:\s+0' <<<"$L" ; then
     exit 0
 fi
 
-cat <<EOF
-$L
-EOF
+cat <<<"$L"
+exit
