@@ -23,7 +23,7 @@ allows you to move/remove messages in a queue, but does not facilitate
 analyzing them.
 
 Usage:
-     smqdecode --body     --config   --flags   --headers  --submission
+     smqdecode --body     --config   --flags   --headers  --raw --submission
                --limit-body=[N,none] --message --metadata --skip-busy
                --queue   --warnings  --type=[all,pended,quarantined,temporary]
                --help    --man       --version

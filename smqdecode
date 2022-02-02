@@ -8,11 +8,11 @@ use warnings;
 use strict;
 
 my $copyright = << 'COPYRIGHT';
-Copyright (C) 2019,2020, 2021 Timothe Litt <litt at acm.org>
+Copyright (C) 2019,2020, 2021, 2022 Timothe Litt <litt at acm.org>
 Use --man for license information.
 COPYRIGHT
 
-our $VERSION = 'V1.005';
+our $VERSION = 'V1.006';
 
 # License is in the POD at the end of this file.
 
@@ -36,6 +36,7 @@ use warnings;
 use strict;
 
 use Carp;
+use Encode( qw/decode encode/ );
 use Fcntl( qw/:flock :seek/ );
 use POSIX( qw/strftime/ );
 
@@ -612,7 +613,7 @@ sub dumpmeta {
 
 # Dump headers
 #
-# $qf->dumpheaders( [$ofh] )
+# $qf->dumpheaders( $flags, [$ofh], $raw )
 
 sub dumpheaders {
     my $qf = shift;
@@ -625,7 +626,13 @@ sub dumpheaders {
         # 0x81 indicates macro expansion.
         # Present as '$' -- and quote any '$' as '\$'
         my $txt = $h->{H};
-        $txt =~ s/([\$\x81])/$1 eq '$'? '\\$':'$'/ge unless( $raw );
+        unless( $raw ) {
+            $txt =~ s/([\$\x81])/$1 eq '$'? '\\$':'$'/ge;
+            if( $txt =~ /=\?.+\?.+\?=/ ) {
+                $txt =~ s/\n\s+//g;
+                $txt = encode( 'utf-8', decode( 'MIME-Header', $txt ) );
+            }
+        }
         print $ofh ( "$txt\n" );
 
         if( $flags && keys %{ $h->{F} } ) {
@@ -1051,7 +1058,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
     require Getopt::Long;
     Getopt::Long->import( qw/GetOptions :config bundling/ );
 
-    my( $meta,  $headers, $body,  $transcript,
+    my( $meta,  $headers, $body,  $transcript, $raw,
         $flags, $limit,   $debug, $submit, $delete,
         $help,  $man,     $version, );
 
@@ -1068,6 +1075,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
         'man'                => \$man,
         'metadata|m!'        => \$meta,
         'queue|q=s'          => \$opts{qdir},
+        'raw|r!'             => \$raw,
         'skip-busy|s!'       => \$opts{skip},
         'submission|submit!' => \$submit,
         'transcript|t!'      => \$transcript,
@@ -1128,7 +1136,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
         $qf->dumpmeta if( $meta );
         if( $headers ) {
             print( "\n" ) if( $meta );
-            $qf->dumpheaders( $flags );
+            $qf->dumpheaders( $flags, undef, $raw );
         }
         if( $body ) {
             print( "\n" ) if( $meta || $headers );
@@ -1197,7 +1205,7 @@ smqdecode - Decode and extract sendmail queue entries
 
 =head1 SYNOPSIS
 
- smqdecode --body    --config   --flags   --headers   --submission
+ smqdecode --body    --config   --flags   --headers   --raw --submission
            --limit-body=[N,none] --message --metadata --skip-busy
            --queue   --warnings  --type=[all,pended,quarantined,temporary]
            --delete
@@ -1251,7 +1259,7 @@ The following options are provided.  The short and long forms of
 each option have the same effect.  The long form of a boolean
 option can be negated by specifying it as B<-->noB<OPTION>.
 
-The usual defaults are --nometadata --headers --nobody --nowarn --limit-body=none.
+The usual defaults are --nometadata --headers --nobody --nowarn --noraw --limit-body=none.
 
 If --delete is specified, the default for --headers is --noheaders.
 
@@ -1321,6 +1329,13 @@ Output the (decoded) metadata for each queued message.
 =item B<-q> B<--queue>=DIR
 
 Look for the queue entries in F<DIR>.  The default is described for B<--config>
+
+=item B<-r> B<--raw>
+
+When decoding headers, do not decode RFC2047-encoded values or macro codes.
+
+The default is to decode RFC2047-encoded values and re-encode them as UTF-8.  Macro
+code are displayed as '$'.
 
 =item B<-s> B<--skip-busy>
 
