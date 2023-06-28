@@ -611,6 +611,18 @@ sub dumpmeta {
     return 1;
 }  # dumpmeta
 
+# Print fromline
+#
+
+sub dumpfromline {
+    my $qf = shift;
+    my $sender = $qf->{qe}->{S};
+    my $ftime = $qf->{qe}->{T};
+ 
+    print "From ", $sender, " ", strftime( '%a %b %d %T %Y', localtime( $ftime ) ), "\n";
+}
+
+
 # Dump headers
 #
 # $qf->dumpheaders( $flags, [$ofh], $raw )
@@ -1060,7 +1072,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
 
     my( $meta,  $headers, $body,  $transcript, $raw,
         $flags, $limit,   $debug, $submit, $delete,
-        $help,  $man,     $version, );
+        $help,  $man,     $version, $mbox, );
 
     my %opts = ( type => qr/[q]/ );
 
@@ -1081,9 +1093,10 @@ unless( __FILE__ =~ /\.pm$/ ) {
         'transcript|t!'      => \$transcript,
         'version'            => \$version,
         'warnings|w!'        => \$opts{warn},
-        'message|M!'     => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
-        'limit-body|l=s' => sub { $limit   = _matchnum( @_ ) },
-        'type|T=s'       => sub {
+        'message|M!'         => sub { $headers = $body = $_[1]; undef $limit if( $_[1] ); },
+        'mbox|F!'            => sub { $mbox = $headers = $body = $_[1]; undef $limit if( $_[1] ); },
+        'limit-body|l=s'     => sub { $limit   = _matchnum( @_ ) },
+        'type|T=s'           => sub {
             $opts{type} = _matchval( @_[ 0, 1 ],
                                      all         => qr/[qht]/,
                                      pended      => qr/[q]/,
@@ -1123,7 +1136,7 @@ unless( __FILE__ =~ /\.pm$/ ) {
 
     my $sep = "";
     foreach my $f ( $smq->entries ) {
-        if( $smq->entries > 1 || $debug ) {
+        if( (not $mbox) && ( $smq->entries > 1 || $debug )) {
             print( $sep );
             $sep = "\n";
             print( '# ', '-' x 80, "\n" );
@@ -1134,13 +1147,15 @@ unless( __FILE__ =~ /\.pm$/ ) {
         next unless( $qf );
 
         $qf->dumpmeta if( $meta );
-        if( $headers ) {
+        if( $headers || $mbox ) {
             print( "\n" ) if( $meta );
+            $qf->dumpfromline if( $mbox );
             $qf->dumpheaders( $flags, undef, $raw );
         }
-        if( $body ) {
+        if( $body || $mbox ) {
             print( "\n" ) if( $meta || $headers );
             $qf->dumpbody( $limit );
+            print( "\n" ) if( $mbox );
         }
         if( $transcript && $qf->has_transcript ) {
             print( "\n" ) if( $meta || $headers || $body );
@@ -1299,6 +1314,14 @@ They apply only to the preceding header.
 Note that this produces output that does not conform to the
 e-mail message format standards.
 
+=item B<-F> B<--mbox>
+
+Output headers and full message body in mbox format, similar to -M, but
+without any queue file name separators between messages.  This option adds an
+mbox-style "From " line at the beginning of the headers, and a newline at the
+end of the body.  When stdout is redirected to a file, this makes the messages
+readable by, e.g. mutt, or other mime-aware mail readers.
+
 =item B<-h> B<--headers>
 
 Output the message headers, formatted for message delivery.
@@ -1320,7 +1343,7 @@ Display complete usage information.
 
 =item B<-M> B<--message>
 
-Output both body and message,  Shortcut for --headers --body --limit=none.
+Output both headers and full message body.  Shortcut for --headers --body --limit=none.
 
 =item B<-m> B<--metadata>
 
